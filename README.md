@@ -15,3 +15,7 @@ It draws inspiration from [Paprika](https://github.com/NethermindEth/Paprika) an
 
 ### Installation
 
+## Other inspirations
+
+- [QMDB](https://github.com/LayerZero-Labs/qmdb) ([paper](https://arxiv.org/pdf/2501.05262))
+- [nomt](https://github.com/thrumdev/nomt)

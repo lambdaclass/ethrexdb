@@ -16,5 +16,8 @@ The following links, repos, companies and projects have been important in the de
 - [QMDB](https://github.com/LayerZero-Labs/qmdb)
 - [Paprika](https://github.com/NethermindEth/Paprika)
 - [MonadDB](https://docs.monad.xyz/monad-arch/execution/monaddb)
+- [Database Internals](https://www.databass.dev/)
+- [PingCAP Talent Plan](https://github.com/pingcap/talent-plan)
+- [Readings in Database System](http://www.redbook.io/)
 
 We're thankful to the teams that created this databases since they were crucial for us to be able to create ethrex_db.

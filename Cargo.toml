@@ -1,0 +1,9 @@
+[package]
+name = "ethrexdb"
+version = "0.1.0"
+edition = "2024"
+description = "A simple database implementation based on the Merkle Patricia Trie (MPT)."
+keywords = ["database", "merkle", "patricia", "trie"]
+categories = ["database-implementations"]
+
+[dependencies]

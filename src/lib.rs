@@ -6,3 +6,5 @@ mod db;
 mod file_manager;
 /// Serialization and deserialization of the trie.
 mod serialization;
+
+pub use db::EthrexDB;

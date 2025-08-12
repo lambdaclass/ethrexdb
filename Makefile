@@ -14,3 +14,6 @@ test: ## 🧪 Run each crate's tests
 
 clean: ## 🧹 Remove build artifacts
 	cargo clean
+
+bench: ## 📊 Run benchmarks
+	cargo build --bench db_benchmark && cargo bench --bench db_benchmark

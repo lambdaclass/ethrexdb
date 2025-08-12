@@ -12,6 +12,10 @@ pub struct FileManager {
 impl FileManager {
     /// Create a new database file
     pub fn create(file_path: PathBuf) -> Result<Self, TrieError> {
+        if let Some(parent) = file_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+
         let mut file = OpenOptions::new()
             .create(true)
             .read(true)

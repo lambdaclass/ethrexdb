@@ -7,3 +7,8 @@ keywords = ["database", "merkle", "patricia", "trie"]
 categories = ["database-implementations"]
 
 [dependencies]
+tempdir = { version = "0.3.7" }
+
+# ethrex
+# ethrex-trie = { git = "https://github.com/lambdaclass/ethrex/", package = "ethrex-trie", rev = "5acad245d6893db13cc2e28c53ba064f33a7e51c" }
+ethrex-trie = { path = "../ethrex/crates/common/trie/" }

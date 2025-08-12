@@ -1,0 +1,354 @@
+//! EthrexDB - A simple MPT database
+// FIXME
+#![allow(dead_code)]
+
+// src/ethrex_db.rs
+use crate::file_manager::FileManager;
+use crate::serialization::{Deserializer, serialize};
+use ethrex_trie::{Node, NodeHash, Trie, TrieError};
+use std::path::PathBuf;
+
+/// Ethrex DB struct
+pub struct EthrexDB {
+    /// File manager
+    file_manager: FileManager,
+}
+
+impl EthrexDB {
+    /// Create a new database
+    pub fn new(file_path: PathBuf) -> Result<Self, TrieError> {
+        let file_manager = FileManager::create(file_path)?;
+        Ok(Self { file_manager })
+    }
+
+    /// Open an existing database
+    pub fn open(file_path: PathBuf) -> Result<Self, TrieError> {
+        let file_manager = FileManager::open(file_path)?;
+        Ok(Self { file_manager })
+    }
+
+    /// Commit a new trie to the database
+    ///
+    /// NOTE: Right now, we are storing the complete trie in the database. We should
+    /// store only the root node and the updated nodes.
+    pub fn commit(&mut self, trie: &Trie) -> Result<NodeHash, TrieError> {
+        let root_node = trie.root_node()?.unwrap();
+        let root_hash = root_node.compute_hash();
+
+        // Read the previous root offset
+        let previous_root_offset = self.file_manager.read_latest_root_offset()?;
+
+        let serialized_trie = serialize(&root_node);
+
+        // Prepare data to write: [prev_offset(8)] + [trie_data]
+        let mut data_to_write = Vec::with_capacity(8 + serialized_trie.len());
+        data_to_write.extend_from_slice(&previous_root_offset.to_le_bytes());
+        data_to_write.extend_from_slice(&serialized_trie);
+
+        // Write at the end and get the new offset
+        let new_root_offset = self.file_manager.write_at_end(&data_to_write)?;
+
+        // Update header with the new offset
+        self.file_manager
+            .update_latest_root_offset(new_root_offset)?;
+
+        Ok(root_hash)
+    }
+
+    /// Get the value of the node with the given key
+    pub fn get(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>, TrieError> {
+        let latest_offset = self.file_manager.read_latest_root_offset()?;
+        self.get_at_version(key, latest_offset)
+    }
+
+    /// Get the value of the node with the given key at a specific version
+    pub fn get_at_version(
+        &mut self,
+        key: &[u8],
+        version_offset: u64,
+    ) -> Result<Option<Vec<u8>>, TrieError> {
+        if version_offset == 0 {
+            return Ok(None);
+        }
+
+        // Read the trie data at the given version
+        let trie_data = self.read_trie_data_at_version(version_offset)?;
+
+        // Get the value of the node with the given key
+        Deserializer::new(&trie_data).get_by_path(key)
+    }
+
+    /// Get all the roots of the database
+    pub fn iter_roots(&mut self) -> Result<Vec<Node>, TrieError> {
+        let mut roots = Vec::new();
+        let mut current_offset = self.file_manager.read_latest_root_offset()?;
+
+        while current_offset != 0 {
+            let trie_data = self.read_trie_data_at_version(current_offset)?;
+
+            let root_node = Deserializer::new(&trie_data).decode_tree()?;
+            roots.push(root_node);
+            current_offset = self.read_previous_offset_at_version(current_offset)?;
+        }
+
+        Ok(roots)
+    }
+
+    /// Read the trie data at a specific version
+    fn read_trie_data_at_version(&mut self, version_offset: u64) -> Result<Vec<u8>, TrieError> {
+        // Seek to the version offset
+        self.file_manager.seek_to(version_offset)?;
+
+        // Skip the previous offset (8 bytes)
+        let _prev_offset_bytes = self.file_manager.read_exact_bytes(8)?;
+
+        // Determinar tamaño de los datos del trie
+        let trie_data_start = self.file_manager.current_position()?;
+        let next_version_offset = self.find_next_version_offset(version_offset)?;
+
+        let trie_data = match next_version_offset {
+            Some(next_offset) => {
+                let size = (next_offset - trie_data_start) as usize;
+                self.file_manager.read_exact_bytes(size)?
+            }
+            None => {
+                // Es la versión más antigua, leer hasta el final
+                self.file_manager.read_from_offset_to_end(trie_data_start)?
+            }
+        };
+
+        Ok(trie_data)
+    }
+
+    /// Read the previous offset at a specific version
+    /// The previous offset is located before the nodes data.
+    fn read_previous_offset_at_version(&mut self, version_offset: u64) -> Result<u64, TrieError> {
+        self.file_manager.seek_to(version_offset)?;
+        let prev_offset_bytes = self.file_manager.read_exact_bytes(8)?;
+        Ok(u64::from_le_bytes([
+            prev_offset_bytes[0],
+            prev_offset_bytes[1],
+            prev_offset_bytes[2],
+            prev_offset_bytes[3],
+            prev_offset_bytes[4],
+            prev_offset_bytes[5],
+            prev_offset_bytes[6],
+            prev_offset_bytes[7],
+        ]))
+    }
+
+    /// Find the offset of the next version
+    fn find_next_version_offset(&mut self, current_offset: u64) -> Result<Option<u64>, TrieError> {
+        let mut offsets = Vec::new();
+        let mut offset = self.file_manager.read_latest_root_offset()?;
+
+        while offset != 0 {
+            offsets.push(offset);
+            offset = self.read_previous_offset_at_version(offset)?;
+        }
+
+        // Find the next offset greater than the current offset
+        Ok(offsets.into_iter().find(|&o| o > current_offset))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ethrex_trie::{InMemoryTrieDB, Node, Trie};
+    use tempdir::TempDir;
+
+    #[test]
+    fn test_create_and_commit() {
+        let temp_dir = TempDir::new("ethrex_db_test").unwrap();
+        let db_path = temp_dir.path().join("test.edb");
+
+        let mut db = EthrexDB::new(db_path.clone()).unwrap();
+
+        let mut trie = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
+        trie.insert(b"hello".to_vec(), b"world".to_vec()).unwrap();
+        trie.insert(b"foo".to_vec(), b"bar".to_vec()).unwrap();
+
+        let root_hash = db.commit(&trie).unwrap();
+        assert!(root_hash.as_ref() != [0u8; 32]);
+    }
+
+    #[test]
+    fn test_open_existing() {
+        let temp_dir = TempDir::new("ethrex_db_test").unwrap();
+        let db_path = temp_dir.path().join("test.edb");
+
+        {
+            let mut db = EthrexDB::new(db_path.clone()).unwrap();
+
+            let mut trie = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
+            trie.insert(b"key".to_vec(), b"value".to_vec()).unwrap();
+            db.commit(&trie).unwrap();
+        }
+
+        let mut db = EthrexDB::open(db_path).unwrap();
+        let value = db.get(b"key").unwrap();
+        assert_eq!(value, Some(b"value".to_vec()));
+    }
+
+    #[test]
+    fn test_get_value() {
+        let temp_dir = TempDir::new("ethrex_db_test").unwrap();
+        let db_path = temp_dir.path().join("test.edb");
+
+        let mut db = EthrexDB::new(db_path.clone()).unwrap();
+
+        // Test getting from empty db
+        assert_eq!(db.get(b"nonexistent").unwrap(), None);
+
+        let mut trie = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
+        trie.insert(b"hello".to_vec(), b"world".to_vec()).unwrap();
+        trie.insert(b"foo".to_vec(), b"bar".to_vec()).unwrap();
+        trie.insert(b"test".to_vec(), b"value".to_vec()).unwrap();
+
+        db.commit(&trie).unwrap();
+
+        // Test getting existing values
+        assert_eq!(db.get(b"hello").unwrap(), Some(b"world".to_vec()));
+        assert_eq!(db.get(b"foo").unwrap(), Some(b"bar".to_vec()));
+        assert_eq!(db.get(b"test").unwrap(), Some(b"value".to_vec()));
+
+        // Test getting non-existent value
+        assert_eq!(db.get(b"nonexistent").unwrap(), None);
+    }
+
+    #[test]
+    fn test_multi_version_trie() {
+        let temp_dir = TempDir::new("ethrex_db_test").unwrap();
+        let db_path = temp_dir.path().join("test.edb");
+
+        let mut db = EthrexDB::new(db_path.clone()).unwrap();
+
+        let mut trie1 = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
+        trie1.insert(b"key1".to_vec(), b"value1".to_vec()).unwrap();
+        trie1.insert(b"common".to_vec(), b"v1".to_vec()).unwrap();
+        db.commit(&trie1).unwrap();
+
+        let mut trie2 = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
+        trie2.insert(b"key2".to_vec(), b"value2".to_vec()).unwrap();
+        trie2.insert(b"common".to_vec(), b"v2".to_vec()).unwrap();
+        db.commit(&trie2).unwrap();
+
+        let mut trie3 = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
+        trie3.insert(b"key3".to_vec(), b"value3".to_vec()).unwrap();
+        trie3.insert(b"common".to_vec(), b"v3".to_vec()).unwrap();
+        db.commit(&trie3).unwrap();
+
+        assert_eq!(db.get(b"key3").unwrap(), Some(b"value3".to_vec()));
+        assert_eq!(db.get(b"common").unwrap(), Some(b"v3".to_vec()));
+        assert_eq!(db.get(b"key1").unwrap(), None);
+        assert_eq!(db.get(b"key2").unwrap(), None);
+
+        let roots: Vec<Node> = db.iter_roots().unwrap();
+        assert_eq!(roots.len(), 3);
+    }
+
+    #[test]
+    fn test_iter_roots() {
+        let temp_dir = TempDir::new("ethrex_db_test").unwrap();
+        let db_path = temp_dir.path().join("test.edb");
+        let mut db = EthrexDB::new(db_path.clone()).unwrap();
+
+        // Empty DB should have no roots
+        let roots: Vec<Node> = db.iter_roots().unwrap();
+        assert_eq!(roots.len(), 0);
+
+        for i in 1..=3 {
+            let mut trie = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
+            trie.insert(
+                format!("key{}", i).into_bytes(),
+                format!("value{}", i).into_bytes(),
+            )
+            .unwrap();
+            db.commit(&trie).unwrap();
+        }
+
+        let roots: Vec<Node> = db.iter_roots().unwrap();
+        assert_eq!(roots.len(), 3);
+
+        for root in &roots {
+            root.compute_hash();
+        }
+    }
+
+    #[test]
+    fn test_complex_db_operations() {
+        let temp_dir = TempDir::new("ethrex_db_complex_test").unwrap();
+        let db_path = temp_dir.path().join("complex_test.edb");
+
+        let test_data_v1 = vec![
+            (b"app".to_vec(), b"application_v1".to_vec()),
+            (b"apple".to_vec(), b"fruit_v1".to_vec()),
+            (b"car".to_vec(), b"vehicle_v1".to_vec()),
+            (b"test".to_vec(), b"examination_v1".to_vec()),
+            (b"0x123456".to_vec(), b"hex_value_v1".to_vec()),
+        ];
+
+        let test_data_v2 = vec![
+            (b"app".to_vec(), b"application_v2".to_vec()),
+            (b"apple".to_vec(), b"fruit_v2".to_vec()),
+            (b"banana".to_vec(), b"fruit_new".to_vec()),
+            (b"car".to_vec(), b"vehicle_v2".to_vec()),
+            (b"bike".to_vec(), b"vehicle_new".to_vec()), // New
+            (b"test".to_vec(), b"examination_v2".to_vec()),
+            (b"0x123456".to_vec(), b"hex_value_v2".to_vec()),
+            (b"0xabcdef".to_vec(), b"hex_new".to_vec()),
+        ];
+
+        let mut db = EthrexDB::new(db_path.clone()).unwrap();
+
+        let mut trie_v1 = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
+        for (key, value) in &test_data_v1 {
+            trie_v1.insert(key.clone(), value.clone()).unwrap();
+        }
+        db.commit(&trie_v1).unwrap();
+
+        let mut trie_v2 = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
+        for (key, value) in &test_data_v2 {
+            trie_v2.insert(key.clone(), value.clone()).unwrap();
+        }
+        db.commit(&trie_v2).unwrap();
+
+        for (key, expected_value) in &test_data_v2 {
+            let result = db.get(key).unwrap();
+            assert_eq!(result, Some(expected_value.clone()));
+        }
+
+        assert_eq!(db.get(b"nonexistent").unwrap(), None);
+
+        let complex_test_data = vec![
+            (
+                b"very_long_key_with_complex_structure_123456789".to_vec(),
+                b"complex_value".to_vec(),
+            ),
+            (b"short".to_vec(), b"val".to_vec()),
+            (b"".to_vec(), b"empty_key_value".to_vec()),
+        ];
+
+        let mut trie_v3 = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
+        for (key, value) in &test_data_v2 {
+            trie_v3.insert(key.clone(), value.clone()).unwrap();
+        }
+        for (key, value) in &complex_test_data {
+            trie_v3.insert(key.clone(), value.clone()).unwrap();
+        }
+        db.commit(&trie_v3).unwrap();
+
+        for (key, expected_value) in &complex_test_data {
+            let result = db.get(key).unwrap();
+            assert_eq!(result, Some(expected_value.clone()));
+        }
+
+        let roots: Vec<Node> = db.iter_roots().unwrap();
+        assert_eq!(roots.len(), 3);
+
+        for root in roots.iter() {
+            root.compute_hash();
+        }
+    }
+}

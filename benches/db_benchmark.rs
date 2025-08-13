@@ -254,16 +254,18 @@ fn random_read_benchmark(c: &mut Criterion) {
             BenchmarkId::new("ethrex_db", size),
             &sample_keys,
             |b, keys| {
-                b.iter(|| {
-                    let mut found = 0;
-                    for key in keys {
-                        let mut db = EthrexDB::open(ethrex_file.clone()).unwrap();
-                        if db.get(black_box(key)).unwrap().is_some() {
-                            found += 1;
+                b.iter_with_setup(
+                    || EthrexDB::open(ethrex_file.clone()).unwrap(),
+                    |db| {
+                        let mut found = 0;
+                        for key in keys {
+                            if db.get(black_box(key)).unwrap().is_some() {
+                                found += 1;
+                            }
                         }
-                    }
-                    black_box(found)
-                });
+                        black_box(found)
+                    },
+                );
             },
         );
     }

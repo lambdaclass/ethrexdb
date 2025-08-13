@@ -57,5 +57,6 @@ fn main() {
     let gets_duration = start_gets.elapsed();
     println!("Gets phase completed in {:?}", gets_duration);
     println!("Hits: {}, Misses: {}", hit_count, miss_count);
+    println!("Total get time: {:?}", gets_duration);
     println!("Average get time: {:?}", gets_duration / 1_000_000);
 }

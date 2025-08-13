@@ -1,7 +1,8 @@
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use ethrex_storage::trie_db::libmdbx::LibmdbxTrieDB;
 use ethrex_storage::trie_db::test_utils::libmdbx::TestNodes;
-use ethrex_trie::{InMemoryTrieDB, Trie, ethrex_db::EthrexDB};
+use ethrex_trie::{InMemoryTrieDB, Trie};
+use ethrexdb::EthrexDB;
 use libmdbx::orm::{Database, Decodable, Encodable, Table, table_info};
 use libmdbx::{DatabaseOptions, Mode, PageSize, ReadWriteOptions, table};
 use rand::{seq::SliceRandom, thread_rng};

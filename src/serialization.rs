@@ -153,62 +153,96 @@ impl Serializer {
 ///
 /// The deserializer reads the binary format produced by [`Serializer`].
 /// It uses the two-node format and converts back to the standard 3-node format.
+/// Optimized for memory-mapped file access with zero-copy operations.
 pub struct Deserializer<'a> {
     /// The byte buffer containing serialized trie data
     buffer: &'a [u8],
-    /// Current reading position in the buffer
-    pub position: usize,
 }
 
 impl<'a> Deserializer<'a> {
-    /// Creates a new deserializer for the given buffer.
+    /// Creates a new fast deserializer for the given buffer
     pub fn new(buffer: &'a [u8]) -> Self {
-        Self {
-            buffer,
-            position: 0,
-        }
+        Self { buffer }
     }
 
-    /// Deserializes a tree from the two-node format back to standard 3-node format
-    pub fn decode_tree(&mut self) -> Result<Node, TrieError> {
-        let node = self.decode_node()?;
-        node.compute_hash();
-        Ok(node)
-    }
-
-    /// Gets a value by path without deserializing the entire trie
-    pub fn get_by_path(&mut self, path: &[u8]) -> Result<Option<Vec<u8>>, TrieError> {
+    /// Gets a value by path without copying data, optimized for memory-mapped files
+    pub fn get_by_path(&self, path: &[u8]) -> Result<Option<Vec<u8>>, TrieError> {
         if self.buffer.is_empty() {
             return Ok(None);
         }
 
         let nibbles = Nibbles::from_raw(path, false);
-        self.get_by_path_inner(nibbles)
+        self.get_by_path_inner(nibbles, 0)
     }
 
-    /// Internal helper for get_by_path
-    fn get_by_path_inner(&mut self, mut path: Nibbles) -> Result<Option<Vec<u8>>, TrieError> {
-        let tag = self.read_byte()?;
+    /// Internal helper for get_by_path with position tracking
+    fn get_by_path_inner(
+        &self,
+        mut path: Nibbles,
+        pos: usize,
+    ) -> Result<Option<Vec<u8>>, TrieError> {
+        if pos >= self.buffer.len() {
+            return Ok(None);
+        }
+
+        let tag = self.buffer[pos];
+        let mut position = pos + 1;
 
         match tag {
             TAG_EXTEND => {
-                // Read nibbles
-                let compact_nibbles = self.read_bytes_with_len()?;
-                let nibbles = Nibbles::decode_compact(&compact_nibbles);
+                // Read nibbles length
+                if position + 4 > self.buffer.len() {
+                    return Ok(None);
+                }
+                let len = u32::from_le_bytes([
+                    self.buffer[position],
+                    self.buffer[position + 1],
+                    self.buffer[position + 2],
+                    self.buffer[position + 3],
+                ]) as usize;
+                position += 4;
+
+                // Read nibbles data
+                if position + len > self.buffer.len() {
+                    return Ok(None);
+                }
+                let compact_nibbles = &self.buffer[position..position + len];
+                let nibbles = Nibbles::decode_compact(compact_nibbles);
+                position += len;
 
                 // Read node offset
-                let mut node_offset_bytes = [0u8; 8];
-                self.read_exact(&mut node_offset_bytes)?;
-                let node_offset = u64::from_le_bytes(node_offset_bytes);
+                if position + 8 > self.buffer.len() {
+                    return Ok(None);
+                }
+                let node_offset = u64::from_le_bytes([
+                    self.buffer[position],
+                    self.buffer[position + 1],
+                    self.buffer[position + 2],
+                    self.buffer[position + 3],
+                    self.buffer[position + 4],
+                    self.buffer[position + 5],
+                    self.buffer[position + 6],
+                    self.buffer[position + 7],
+                ]);
+                position += 8;
 
                 // Read value offset
-                let mut value_offset_bytes = [0u8; 8];
-                self.read_exact(&mut value_offset_bytes)?;
-                let value_offset = u64::from_le_bytes(value_offset_bytes);
+                if position + 8 > self.buffer.len() {
+                    return Ok(None);
+                }
+                let value_offset = u64::from_le_bytes([
+                    self.buffer[position],
+                    self.buffer[position + 1],
+                    self.buffer[position + 2],
+                    self.buffer[position + 3],
+                    self.buffer[position + 4],
+                    self.buffer[position + 5],
+                    self.buffer[position + 6],
+                    self.buffer[position + 7],
+                ]);
 
-                // Check if this is a leaf (only value, includes empty values)
+                // Check if this is a leaf (only value)
                 if node_offset == 0 && value_offset > 0 {
-                    // This is a leaf node - check if paths match
                     let leaf_path_without_flag = if nibbles.is_leaf() {
                         nibbles.slice(0, nibbles.len() - 1)
                     } else {
@@ -216,49 +250,43 @@ impl<'a> Deserializer<'a> {
                     };
 
                     if path == leaf_path_without_flag {
-                        let saved_pos = self.position;
-                        self.position = value_offset as usize;
-                        let value = self.read_bytes_with_len()?;
-                        self.position = saved_pos;
-                        Ok(Some(value))
+                        return self.read_value_at_offset(value_offset as usize);
                     } else {
-                        Ok(None)
+                        return Ok(None);
                     }
                 } else if node_offset > 0 && value_offset == 0 {
-                    // This is an extension node
+                    // Extension node
                     if !path.skip_prefix(&nibbles) {
                         return Ok(None);
                     }
-
-                    // Continue searching in child
-                    let saved_pos = self.position;
-                    self.position = node_offset as usize;
-                    let result = self.get_by_path_inner(path)?;
-                    self.position = saved_pos;
-                    Ok(result)
+                    return self.get_by_path_inner(path, node_offset as usize);
                 } else {
-                    // Extend with both child and value not supported yet
                     panic!("Extend node with both child and value not yet supported");
                 }
             }
             TAG_BRANCH => {
                 if path.is_empty() {
-                    // We want the branch value
-                    // Skip to value offset (after 16 child offsets)
-                    self.position += 16 * 8;
+                    // We want the branch value - skip 16 child offsets
+                    position += 16 * 8;
 
-                    let mut value_offset_bytes = [0u8; 8];
-                    self.read_exact(&mut value_offset_bytes)?;
-                    let value_offset = u64::from_le_bytes(value_offset_bytes);
+                    if position + 8 > self.buffer.len() {
+                        return Ok(None);
+                    }
+                    let value_offset = u64::from_le_bytes([
+                        self.buffer[position],
+                        self.buffer[position + 1],
+                        self.buffer[position + 2],
+                        self.buffer[position + 3],
+                        self.buffer[position + 4],
+                        self.buffer[position + 5],
+                        self.buffer[position + 6],
+                        self.buffer[position + 7],
+                    ]);
 
                     if value_offset > 0 {
-                        let saved_pos = self.position;
-                        self.position = value_offset as usize;
-                        let value = self.read_bytes_with_len()?;
-                        self.position = saved_pos;
-                        Ok(Some(value))
+                        return self.read_value_at_offset(value_offset as usize);
                     } else {
-                        Ok(None)
+                        return Ok(None);
                     }
                 } else {
                     // Get next nibble and find corresponding child
@@ -268,19 +296,26 @@ impl<'a> Deserializer<'a> {
                     };
 
                     // Read child offset at position next_nibble
-                    self.position += next_nibble * 8;
-                    let mut child_offset_bytes = [0u8; 8];
-                    self.read_exact(&mut child_offset_bytes)?;
-                    let child_offset = u64::from_le_bytes(child_offset_bytes);
+                    let child_offset_pos = position + next_nibble * 8;
+                    if child_offset_pos + 8 > self.buffer.len() {
+                        return Ok(None);
+                    }
+
+                    let child_offset = u64::from_le_bytes([
+                        self.buffer[child_offset_pos],
+                        self.buffer[child_offset_pos + 1],
+                        self.buffer[child_offset_pos + 2],
+                        self.buffer[child_offset_pos + 3],
+                        self.buffer[child_offset_pos + 4],
+                        self.buffer[child_offset_pos + 5],
+                        self.buffer[child_offset_pos + 6],
+                        self.buffer[child_offset_pos + 7],
+                    ]);
 
                     if child_offset > 0 {
-                        let saved_pos = self.position;
-                        self.position = child_offset as usize;
-                        let result = self.get_by_path_inner(path)?;
-                        self.position = saved_pos;
-                        Ok(result)
+                        return self.get_by_path_inner(path, child_offset as usize);
                     } else {
-                        Ok(None)
+                        return Ok(None);
                     }
                 }
             }
@@ -288,51 +323,114 @@ impl<'a> Deserializer<'a> {
         }
     }
 
-    /// Decodes a node from the two-node format
-    fn decode_node(&mut self) -> Result<Node, TrieError> {
-        let tag = self.read_byte()?;
+    /// Read value at specific offset
+    fn read_value_at_offset(&self, offset: usize) -> Result<Option<Vec<u8>>, TrieError> {
+        if offset + 4 > self.buffer.len() {
+            return Ok(None);
+        }
+
+        let len = u32::from_le_bytes([
+            self.buffer[offset],
+            self.buffer[offset + 1],
+            self.buffer[offset + 2],
+            self.buffer[offset + 3],
+        ]) as usize;
+
+        let data_start = offset + 4;
+        if data_start + len > self.buffer.len() {
+            return Ok(None);
+        }
+
+        Ok(Some(self.buffer[data_start..data_start + len].to_vec()))
+    }
+
+    /// Deserializes a tree from the two-node format back to standard 3-node format
+    pub fn decode_tree(&self) -> Result<Node, TrieError> {
+        let node = self.decode_node_at(0)?;
+        node.compute_hash();
+        Ok(node)
+    }
+
+    /// Decodes a node from the two-node format at specific position
+    fn decode_node_at(&self, pos: usize) -> Result<Node, TrieError> {
+        if pos >= self.buffer.len() {
+            panic!("Invalid buffer position");
+        }
+
+        let tag = self.buffer[pos];
+        let mut position = pos + 1;
 
         match tag {
             TAG_EXTEND => {
+                // Read nibbles length
+                if position + 4 > self.buffer.len() {
+                    panic!("Invalid buffer length");
+                }
+                let len = u32::from_le_bytes([
+                    self.buffer[position],
+                    self.buffer[position + 1],
+                    self.buffer[position + 2],
+                    self.buffer[position + 3],
+                ]) as usize;
+                position += 4;
+
                 // Read nibbles
-                let compact_nibbles = self.read_bytes_with_len()?;
-                let nibbles = Nibbles::decode_compact(&compact_nibbles);
+                if position + len > self.buffer.len() {
+                    panic!("Invalid buffer length");
+                }
+                let compact_nibbles = &self.buffer[position..position + len];
+                let nibbles = Nibbles::decode_compact(compact_nibbles);
+                position += len;
 
                 // Read node offset
-                let mut node_offset_bytes = [0u8; 8];
-                self.read_exact(&mut node_offset_bytes)?;
-                let node_offset = u64::from_le_bytes(node_offset_bytes);
+                if position + 8 > self.buffer.len() {
+                    panic!("Invalid buffer length");
+                }
+                let node_offset = u64::from_le_bytes([
+                    self.buffer[position],
+                    self.buffer[position + 1],
+                    self.buffer[position + 2],
+                    self.buffer[position + 3],
+                    self.buffer[position + 4],
+                    self.buffer[position + 5],
+                    self.buffer[position + 6],
+                    self.buffer[position + 7],
+                ]);
+                position += 8;
 
                 // Read value offset
-                let mut value_offset_bytes = [0u8; 8];
-                self.read_exact(&mut value_offset_bytes)?;
-                let value_offset = u64::from_le_bytes(value_offset_bytes);
+                if position + 8 > self.buffer.len() {
+                    panic!("Invalid buffer length");
+                }
+                let value_offset = u64::from_le_bytes([
+                    self.buffer[position],
+                    self.buffer[position + 1],
+                    self.buffer[position + 2],
+                    self.buffer[position + 3],
+                    self.buffer[position + 4],
+                    self.buffer[position + 5],
+                    self.buffer[position + 6],
+                    self.buffer[position + 7],
+                ]);
 
                 // Determine node type based on what's present
                 match (node_offset > 0, value_offset > 0) {
                     (false, true) => {
-                        // Only value = Leaf node (includes empty values)
-                        let saved_pos = self.position;
-                        self.position = value_offset as usize;
-                        let value = self.read_bytes_with_len()?;
-                        self.position = saved_pos;
+                        // Only value = Leaf node
+                        let value = self
+                            .read_value_at_offset(value_offset as usize)?
+                            .unwrap_or_default();
                         Ok(Node::Leaf(LeafNode::new(nibbles, value)))
                     }
                     (true, false) => {
                         // Only child = Extension node
-                        let saved_pos = self.position;
-                        self.position = node_offset as usize;
-                        let child = self.decode_node()?;
-                        self.position = saved_pos;
-
+                        let child = self.decode_node_at(node_offset as usize)?;
                         Ok(Node::Extension(ExtensionNode::new(
                             nibbles,
                             NodeRef::Node(Arc::new(child), OnceLock::new()),
                         )))
                     }
                     (true, true) => {
-                        // Both child and value - this is a special case
-                        // For now, treat as Extension with child that has the value
                         panic!("Extend node with both child and value not yet supported");
                     }
                     (false, false) => {
@@ -343,36 +441,51 @@ impl<'a> Deserializer<'a> {
             TAG_BRANCH => {
                 // Read 16 child offsets
                 let mut child_offsets = [0u64; 16];
-                for child in child_offsets.iter_mut() {
-                    let mut offset_bytes = [0u8; 8];
-                    self.read_exact(&mut offset_bytes)?;
-                    *child = u64::from_le_bytes(offset_bytes);
+                for i in 0..16 {
+                    if position + 8 > self.buffer.len() {
+                        panic!("Invalid buffer length");
+                    }
+                    child_offsets[i] = u64::from_le_bytes([
+                        self.buffer[position],
+                        self.buffer[position + 1],
+                        self.buffer[position + 2],
+                        self.buffer[position + 3],
+                        self.buffer[position + 4],
+                        self.buffer[position + 5],
+                        self.buffer[position + 6],
+                        self.buffer[position + 7],
+                    ]);
+                    position += 8;
                 }
 
                 // Read value offset
-                let mut value_offset_bytes = [0u8; 8];
-                self.read_exact(&mut value_offset_bytes)?;
-                let value_offset = u64::from_le_bytes(value_offset_bytes);
+                if position + 8 > self.buffer.len() {
+                    panic!("Invalid buffer length");
+                }
+                let value_offset = u64::from_le_bytes([
+                    self.buffer[position],
+                    self.buffer[position + 1],
+                    self.buffer[position + 2],
+                    self.buffer[position + 3],
+                    self.buffer[position + 4],
+                    self.buffer[position + 5],
+                    self.buffer[position + 6],
+                    self.buffer[position + 7],
+                ]);
 
                 // Build children NodeRefs
                 let mut children: [NodeRef; 16] = Default::default();
                 for (i, &offset) in child_offsets.iter().enumerate() {
                     if offset > 0 {
-                        let saved_pos = self.position;
-                        self.position = offset as usize;
-                        let child = self.decode_node()?;
-                        self.position = saved_pos;
+                        let child = self.decode_node_at(offset as usize)?;
                         children[i] = NodeRef::Node(Arc::new(child), OnceLock::new());
                     }
                 }
 
                 // Read value if present
                 let value = if value_offset > 0 {
-                    let saved_pos = self.position;
-                    self.position = value_offset as usize;
-                    let val = self.read_bytes_with_len()?;
-                    self.position = saved_pos;
-                    val
+                    self.read_value_at_offset(value_offset as usize)?
+                        .unwrap_or_default()
                 } else {
                     vec![]
                 };
@@ -383,40 +496,6 @@ impl<'a> Deserializer<'a> {
             }
             _ => panic!("Invalid node tag: {}", tag),
         }
-    }
-
-    fn read_byte(&mut self) -> Result<u8, TrieError> {
-        if self.position >= self.buffer.len() {
-            panic!("Invalid buffer length when trying to read byte");
-        }
-        let byte = self.buffer[self.position];
-        self.position += 1;
-        Ok(byte)
-    }
-
-    /// Reads exactly `buf.len()` bytes into the provided buffer.
-    fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), TrieError> {
-        let end = self.position + buf.len();
-        if end > self.buffer.len() {
-            panic!("Invalid buffer length when trying to read exact bytes");
-        }
-        buf.copy_from_slice(&self.buffer[self.position..end]);
-        self.position = end;
-        Ok(())
-    }
-
-    /// Reads a byte array with length prefix.
-    /// Format: `[length(4 bytes), data...]`
-    fn read_bytes_with_len(&mut self) -> Result<Vec<u8>, TrieError> {
-        // Read length prefix
-        let mut len_bytes = [0u8; 4];
-        self.read_exact(&mut len_bytes)?;
-        let len = u32::from_le_bytes(len_bytes);
-
-        // Read data
-        let mut data = vec![0u8; len as usize];
-        self.read_exact(&mut data)?;
-        Ok(data)
     }
 }
 

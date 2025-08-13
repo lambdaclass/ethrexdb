@@ -1,12 +1,15 @@
 use ethrex_trie::TrieError;
+use memmap2::{Mmap, MmapOptions};
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
 /// Responsible for file management and offsets
 pub struct FileManager {
     /// File where the data is stored
     file: File,
+    /// Memory-mapped view of the file for fast reads
+    mmap: Mmap,
 }
 
 impl FileManager {
@@ -27,10 +30,12 @@ impl FileManager {
         // Write initial offset (8 bytes = 0)
         let initial_offset = 0u64;
         file.write_all(&initial_offset.to_le_bytes()).unwrap();
-
         file.flush().unwrap();
 
-        Ok(Self { file })
+        // Create memory map
+        let mmap = unsafe { MmapOptions::new().map(&file).unwrap() };
+
+        Ok(Self { file, mmap })
     }
 
     /// Open an existing file
@@ -41,26 +46,30 @@ impl FileManager {
             .open(&file_path)
             .unwrap();
 
-        Ok(Self { file })
+        // Create memory map
+        let mmap = unsafe { MmapOptions::new().map(&file).unwrap() };
+
+        Ok(Self { file, mmap })
     }
 
     /// Read the offset of the latest root (first 8 bytes of the file)
-    pub fn read_latest_root_offset(&mut self) -> Result<u64, TrieError> {
-        self.file.seek(SeekFrom::Start(0)).unwrap();
+    pub fn read_latest_root_offset(&self) -> Result<u64, TrieError> {
+        if self.mmap.len() < 8 {
+            return Ok(0);
+        }
 
-        let mut offset_bytes = [0u8; 8];
-        self.file.read_exact(&mut offset_bytes).unwrap();
-
+        let offset_bytes: [u8; 8] = self.mmap[0..8].try_into().unwrap();
         Ok(u64::from_le_bytes(offset_bytes))
     }
 
     /// Update the offset of the latest root (first 8 bytes of the file)
     pub fn update_latest_root_offset(&mut self, new_offset: u64) -> Result<(), TrieError> {
         self.file.seek(SeekFrom::Start(0)).unwrap();
-
         self.file.write_all(&new_offset.to_le_bytes()).unwrap();
-
         self.file.flush().unwrap();
+
+        // Recreate mmap after write to see the changes
+        self.mmap = unsafe { MmapOptions::new().map(&self.file).unwrap() };
 
         Ok(())
     }
@@ -68,46 +77,54 @@ impl FileManager {
     /// Write data at the end of the file and return the offset where it was written
     pub fn write_at_end(&mut self, data: &[u8]) -> Result<u64, TrieError> {
         let offset = self.file.seek(SeekFrom::End(0)).unwrap();
-
         self.file.write_all(data).unwrap();
-
         self.file.flush().unwrap();
+
+        // Recreate mmap after write to see the changes
+        self.mmap = unsafe { MmapOptions::new().map(&self.file).unwrap() };
 
         Ok(offset)
     }
 
-    /// Read data from a specific offset to the end of the file
-    pub fn read_from_offset_to_end(&mut self, offset: u64) -> Result<Vec<u8>, TrieError> {
-        self.file.seek(SeekFrom::Start(offset)).unwrap();
+    /// Get slice from a specific offset to the end of the file
+    pub fn get_slice_to_end(&self, offset: u64) -> Result<&[u8], TrieError> {
+        if offset as usize >= self.mmap.len() {
+            return Ok(&[]);
+        }
 
-        let mut data = Vec::new();
-        self.file.read_to_end(&mut data).unwrap();
-
-        Ok(data)
+        Ok(&self.mmap[offset as usize..])
     }
 
-    /// Read exactly n bytes from the current position
-    pub fn read_exact_bytes(&mut self, size: usize) -> Result<Vec<u8>, TrieError> {
-        let mut data = vec![0u8; size];
-        self.file.read_exact(&mut data).unwrap();
-        Ok(data)
+    /// Get slice of exactly n bytes from a specific offset
+    pub fn get_slice_at(&self, offset: u64, size: usize) -> Result<&[u8], TrieError> {
+        let start = offset as usize;
+        let end = start + size;
+
+        assert!(end <= self.mmap.len(), "Offset out of bounds");
+
+        Ok(&self.mmap[start..end])
     }
 
-    /// Get the current position in the file
-    pub fn current_position(&mut self) -> Result<u64, TrieError> {
-        Ok(self.file.stream_position().unwrap())
+    /// Get the file size
+    pub fn file_size(&self) -> u64 {
+        self.mmap.len() as u64
     }
 
-    /// Move to a specific position
-    pub fn seek_to(&mut self, offset: u64) -> Result<(), TrieError> {
-        self.file.seek(SeekFrom::Start(offset)).unwrap();
-        Ok(())
+    /// Get slice from mmap at specific offset and size
+    pub fn get_slice(&self, offset: u64, size: usize) -> Result<&[u8], TrieError> {
+        let start = offset as usize;
+        let end = start + size;
+
+        assert!(end <= self.mmap.len(), "Offset out of bounds");
+
+        Ok(&self.mmap[start..end])
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
     use tempdir::TempDir;
 
     #[test]
@@ -158,7 +175,7 @@ mod tests {
         let mut fm = FileManager::open(file_path).unwrap();
         assert_eq!(fm.read_latest_root_offset().unwrap(), 456);
 
-        let data = fm.read_from_offset_to_end(8).unwrap();
+        let data = fm.get_slice_to_end(8).unwrap().to_vec();
         assert_eq!(data, b"persistent data");
     }
 }

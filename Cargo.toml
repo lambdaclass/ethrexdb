@@ -25,3 +25,7 @@ rand = "0.8.5"
 [[bench]]
 name = "db_benchmark"
 harness = false
+
+[profile.release-with-debug]
+inherits = "release"
+debug = 2

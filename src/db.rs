@@ -56,14 +56,14 @@ impl EthrexDB {
     }
 
     /// Get the value of the node with the given key
-    pub fn get(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>, TrieError> {
+    pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, TrieError> {
         let latest_offset = self.file_manager.read_latest_root_offset()?;
         self.get_at_version(key, latest_offset)
     }
 
     /// Get the value of the node with the given key at a specific version
     pub fn get_at_version(
-        &mut self,
+        &self,
         key: &[u8],
         version_offset: u64,
     ) -> Result<Option<Vec<u8>>, TrieError> {
@@ -71,22 +71,23 @@ impl EthrexDB {
             return Ok(None);
         }
 
-        // Read the trie data at the given version
-        let trie_data = self.read_trie_data_at_version(version_offset)?;
+        // Get trie data slice at the given version
+        let trie_data = self.get_trie_data_at_version(version_offset)?;
 
-        // Get the value of the node with the given key
-        Deserializer::new(&trie_data).get_by_path(key)
+        // Use deserializer optimized for memory-mapped access
+        Deserializer::new(trie_data).get_by_path(key)
     }
 
     /// Get all the roots of the database
-    pub fn iter_roots(&mut self) -> Result<Vec<Node>, TrieError> {
+    pub fn iter_roots(&self) -> Result<Vec<Node>, TrieError> {
         let mut roots = Vec::new();
         let mut current_offset = self.file_manager.read_latest_root_offset()?;
 
         while current_offset != 0 {
-            let trie_data = self.read_trie_data_at_version(current_offset)?;
+            let trie_data = self.get_trie_data_at_version(current_offset)?;
 
-            let root_node = Deserializer::new(&trie_data).decode_tree()?;
+            // Still need to copy for deserializer decode_tree
+            let root_node = Deserializer::new(trie_data).decode_tree()?;
             roots.push(root_node);
             current_offset = self.read_previous_offset_at_version(current_offset)?;
         }
@@ -94,51 +95,42 @@ impl EthrexDB {
         Ok(roots)
     }
 
-    /// Read the trie data at a specific version
-    fn read_trie_data_at_version(&mut self, version_offset: u64) -> Result<Vec<u8>, TrieError> {
-        // Seek to the version offset
-        self.file_manager.seek_to(version_offset)?;
-
-        // Skip the previous offset (8 bytes)
-        let _prev_offset_bytes = self.file_manager.read_exact_bytes(8)?;
-
-        // Determinar tamaño de los datos del trie
-        let trie_data_start = self.file_manager.current_position()?;
+    /// Get trie data slice at a specific version
+    fn get_trie_data_at_version(&self, version_offset: u64) -> Result<&[u8], TrieError> {
+        // Skip the previous offset (8 bytes) and read trie data
+        let trie_data_start = version_offset + 8;
         let next_version_offset = self.find_next_version_offset(version_offset)?;
 
-        let trie_data = match next_version_offset {
+        match next_version_offset {
             Some(next_offset) => {
                 let size = (next_offset - trie_data_start) as usize;
-                self.file_manager.read_exact_bytes(size)?
+                self.file_manager.get_slice_at(trie_data_start, size)
             }
             None => {
                 // Es la versión más antigua, leer hasta el final
-                self.file_manager.read_from_offset_to_end(trie_data_start)?
+                self.file_manager.get_slice_to_end(trie_data_start)
             }
-        };
-
-        Ok(trie_data)
+        }
     }
 
     /// Read the previous offset at a specific version
     /// The previous offset is located before the nodes data.
-    fn read_previous_offset_at_version(&mut self, version_offset: u64) -> Result<u64, TrieError> {
-        self.file_manager.seek_to(version_offset)?;
-        let prev_offset_bytes = self.file_manager.read_exact_bytes(8)?;
+    fn read_previous_offset_at_version(&self, version_offset: u64) -> Result<u64, TrieError> {
+        let prev_offset_slice = self.file_manager.get_slice_at(version_offset, 8)?;
         Ok(u64::from_le_bytes([
-            prev_offset_bytes[0],
-            prev_offset_bytes[1],
-            prev_offset_bytes[2],
-            prev_offset_bytes[3],
-            prev_offset_bytes[4],
-            prev_offset_bytes[5],
-            prev_offset_bytes[6],
-            prev_offset_bytes[7],
+            prev_offset_slice[0],
+            prev_offset_slice[1],
+            prev_offset_slice[2],
+            prev_offset_slice[3],
+            prev_offset_slice[4],
+            prev_offset_slice[5],
+            prev_offset_slice[6],
+            prev_offset_slice[7],
         ]))
     }
 
     /// Find the offset of the next version
-    fn find_next_version_offset(&mut self, current_offset: u64) -> Result<Option<u64>, TrieError> {
+    fn find_next_version_offset(&self, current_offset: u64) -> Result<Option<u64>, TrieError> {
         let mut offsets = Vec::new();
         let mut offset = self.file_manager.read_latest_root_offset()?;
 

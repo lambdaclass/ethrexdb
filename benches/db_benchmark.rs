@@ -128,21 +128,11 @@ impl LibmdbxPathDB {
     }
 }
 
-fn create_ethrex_db(data: &[(Vec<u8>, Vec<u8>)], file_path: &std::path::Path) -> EthrexDB {
-    let mut db = EthrexDB::new(file_path.into()).unwrap();
-    let mut trie = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
-    for (key, value) in data {
-        trie.insert(key.clone(), value.clone()).unwrap();
-    }
-    db.commit(&trie).unwrap();
-    db
-}
-
 fn batch_insert_benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("batch_insert");
     group.measurement_time(Duration::from_secs(15));
 
-    for size in [1_000, 10_000, 100_000] {
+    for size in [1_000, 10_000, 100_000, 1_000_000] {
         let data = generate_test_data(size);
 
         // Hash
@@ -178,11 +168,16 @@ fn batch_insert_benchmark(c: &mut Criterion) {
             b.iter_with_setup(
                 || {
                     let temp_dir = TempDir::new("ethrex_bench").unwrap();
-                    temp_dir.path().join("test.edb")
+                    let file_path = temp_dir.path().join("test.edb");
+                    EthrexDB::new(file_path).unwrap()
                 },
-                |file_path| {
-                    let db = create_ethrex_db(black_box(data), black_box(&file_path));
-                    black_box(db)
+                |mut db| {
+                    let mut trie = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
+                    for (key, value) in data {
+                        trie.insert(key.clone(), value.clone()).unwrap();
+                    }
+                    db.commit(&trie).unwrap();
+                    db
                 },
             );
         });
@@ -195,7 +190,7 @@ fn random_read_benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("random_read");
     group.measurement_time(Duration::from_secs(15));
 
-    for size in [1_000, 10_000, 100_000] {
+    for size in [1_000, 10_000, 100_000, 1_000_000] {
         let data = generate_test_data(size);
 
         let sample_size = std::cmp::max(1, size / 1000);
@@ -216,7 +211,12 @@ fn random_read_benchmark(c: &mut Criterion) {
 
         let ethrex_temp = TempDir::new("ethrex_read").unwrap();
         let ethrex_file = ethrex_temp.path().join("test.edb");
-        let _ethrex_db = create_ethrex_db(&data, &ethrex_file);
+        let mut ethrex_db = EthrexDB::new(ethrex_file.clone()).unwrap();
+        let mut trie = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
+        for (key, value) in &data {
+            trie.insert(key.clone(), value.clone()).unwrap();
+        }
+        ethrex_db.commit(&trie).unwrap();
 
         group.bench_with_input(
             BenchmarkId::new("libmdbx_hash", size),

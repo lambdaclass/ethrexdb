@@ -8,7 +8,7 @@ use std::path::PathBuf;
 pub struct FileManager {
     /// File where the data is stored
     file: File,
-    /// Memory-mapped view of the file for fast reads
+    /// Memory-mapped of the file
     mmap: Mmap,
 }
 
@@ -32,7 +32,6 @@ impl FileManager {
         file.write_all(&initial_offset.to_le_bytes()).unwrap();
         file.flush().unwrap();
 
-        // Create memory map
         let mmap = unsafe { MmapOptions::new().map(&file).unwrap() };
 
         Ok(Self { file, mmap })
@@ -46,7 +45,6 @@ impl FileManager {
             .open(&file_path)
             .unwrap();
 
-        // Create memory map
         let mmap = unsafe { MmapOptions::new().map(&file).unwrap() };
 
         Ok(Self { file, mmap })
@@ -68,7 +66,7 @@ impl FileManager {
         self.file.write_all(&new_offset.to_le_bytes()).unwrap();
         self.file.flush().unwrap();
 
-        // Recreate mmap after write to see the changes
+        // TODO: Check if this is needed
         self.mmap = unsafe { MmapOptions::new().map(&self.file).unwrap() };
 
         Ok(())
@@ -80,7 +78,7 @@ impl FileManager {
         self.file.write_all(data).unwrap();
         self.file.flush().unwrap();
 
-        // Recreate mmap after write to see the changes
+        // TODO: Check if this is needed
         self.mmap = unsafe { MmapOptions::new().map(&self.file).unwrap() };
 
         Ok(offset)
@@ -97,21 +95,6 @@ impl FileManager {
 
     /// Get slice of exactly n bytes from a specific offset
     pub fn get_slice_at(&self, offset: u64, size: usize) -> Result<&[u8], TrieError> {
-        let start = offset as usize;
-        let end = start + size;
-
-        assert!(end <= self.mmap.len(), "Offset out of bounds");
-
-        Ok(&self.mmap[start..end])
-    }
-
-    /// Get the file size
-    pub fn file_size(&self) -> u64 {
-        self.mmap.len() as u64
-    }
-
-    /// Get slice from mmap at specific offset and size
-    pub fn get_slice(&self, offset: u64, size: usize) -> Result<&[u8], TrieError> {
         let start = offset as usize;
         let end = start + size;
 
@@ -172,7 +155,7 @@ mod tests {
             fm.write_at_end(b"persistent data").unwrap();
         }
 
-        let mut fm = FileManager::open(file_path).unwrap();
+        let fm = FileManager::open(file_path).unwrap();
         assert_eq!(fm.read_latest_root_offset().unwrap(), 456);
 
         let data = fm.get_slice_to_end(8).unwrap().to_vec();

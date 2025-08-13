@@ -250,16 +250,16 @@ impl<'a> Deserializer<'a> {
                     };
 
                     if path == leaf_path_without_flag {
-                        return self.read_value_at_offset(value_offset as usize);
+                        self.read_value_at_offset(value_offset as usize)
                     } else {
-                        return Ok(None);
+                        Ok(None)
                     }
                 } else if node_offset > 0 && value_offset == 0 {
                     // Extension node
                     if !path.skip_prefix(&nibbles) {
                         return Ok(None);
                     }
-                    return self.get_by_path_inner(path, node_offset as usize);
+                    self.get_by_path_inner(path, node_offset as usize)
                 } else {
                     panic!("Extend node with both child and value not yet supported");
                 }
@@ -284,9 +284,9 @@ impl<'a> Deserializer<'a> {
                     ]);
 
                     if value_offset > 0 {
-                        return self.read_value_at_offset(value_offset as usize);
+                        self.read_value_at_offset(value_offset as usize)
                     } else {
-                        return Ok(None);
+                        Ok(None)
                     }
                 } else {
                     // Get next nibble and find corresponding child
@@ -313,9 +313,9 @@ impl<'a> Deserializer<'a> {
                     ]);
 
                     if child_offset > 0 {
-                        return self.get_by_path_inner(path, child_offset as usize);
+                        self.get_by_path_inner(path, child_offset as usize)
                     } else {
-                        return Ok(None);
+                        Ok(None)
                     }
                 }
             }
@@ -441,11 +441,11 @@ impl<'a> Deserializer<'a> {
             TAG_BRANCH => {
                 // Read 16 child offsets
                 let mut child_offsets = [0u64; 16];
-                for i in 0..16 {
+                for child in child_offsets.iter_mut() {
                     if position + 8 > self.buffer.len() {
                         panic!("Invalid buffer length");
                     }
-                    child_offsets[i] = u64::from_le_bytes([
+                    *child = u64::from_le_bytes([
                         self.buffer[position],
                         self.buffer[position + 1],
                         self.buffer[position + 2],
@@ -701,14 +701,13 @@ mod test {
         let root = trie.root_node().unwrap().unwrap();
         let buffer = serialize(&root);
 
-        let mut deserializer = Deserializer::new(&buffer);
+        let deserializer = Deserializer::new(&buffer);
         assert_eq!(
             deserializer.get_by_path(b"test").unwrap(),
             Some(b"value".to_vec())
         );
 
-        // Reset position before decoding tree
-        let mut deserializer = Deserializer::new(&buffer);
+        let deserializer = Deserializer::new(&buffer);
         let recovered = deserializer.decode_tree().unwrap();
         assert_eq!(root, recovered);
     }
@@ -731,38 +730,38 @@ mod test {
         let root = trie.root_node().unwrap().unwrap();
         let buffer = serialize(&root);
 
-        let mut deserializer = Deserializer::new(&buffer);
+        let deserializer = Deserializer::new(&buffer);
         assert_eq!(
             deserializer.get_by_path(b"horse").unwrap(),
             Some(b"stallion".to_vec())
         );
 
-        let mut deserializer = Deserializer::new(&buffer);
+        let deserializer = Deserializer::new(&buffer);
         assert_eq!(
             deserializer.get_by_path(b"dog").unwrap(),
             Some(b"puppy".to_vec())
         );
 
-        let mut deserializer = Deserializer::new(&buffer);
+        let deserializer = Deserializer::new(&buffer);
         assert_eq!(
             deserializer.get_by_path(b"doge").unwrap(),
             Some(b"coin".to_vec())
         );
 
-        let mut deserializer = Deserializer::new(&buffer);
+        let deserializer = Deserializer::new(&buffer);
         assert_eq!(
             deserializer.get_by_path(b"do").unwrap(),
             Some(b"verb".to_vec())
         );
 
-        let mut deserializer = Deserializer::new(&buffer);
+        let deserializer = Deserializer::new(&buffer);
         assert_eq!(deserializer.get_by_path(b"cat").unwrap(), None);
 
-        let mut deserializer = Deserializer::new(&buffer);
+        let deserializer = Deserializer::new(&buffer);
         assert_eq!(deserializer.get_by_path(b"").unwrap(), None);
 
         // Reset position before decoding tree
-        let mut deserializer = Deserializer::new(&buffer);
+        let deserializer = Deserializer::new(&buffer);
         let recovered = deserializer.decode_tree().unwrap();
         assert_eq!(root, recovered);
     }
@@ -821,7 +820,7 @@ mod test {
         let buffer = serialize(&root);
 
         for (key, expected_value) in &test_data {
-            let mut deserializer = Deserializer::new(&buffer);
+            let deserializer = Deserializer::new(&buffer);
             let retrieved_value = deserializer.get_by_path(key).unwrap();
             assert_eq!(retrieved_value, Some(expected_value.clone()));
         }
@@ -838,12 +837,12 @@ mod test {
         ];
 
         for key in &non_existent_keys {
-            let mut deserializer = Deserializer::new(&buffer);
+            let deserializer = Deserializer::new(&buffer);
             let result = deserializer.get_by_path(key).unwrap();
             assert_eq!(result, None);
         }
 
-        let mut deserializer = Deserializer::new(&buffer);
+        let deserializer = Deserializer::new(&buffer);
         let recovered = deserializer.decode_tree().unwrap();
 
         assert_eq!(root, recovered);

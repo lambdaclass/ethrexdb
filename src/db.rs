@@ -71,10 +71,8 @@ impl EthrexDB {
             return Ok(None);
         }
 
-        // Get trie data slice at the given version
         let trie_data = self.get_trie_data_at_version(version_offset)?;
 
-        // Use deserializer optimized for memory-mapped access
         Deserializer::new(trie_data).get_by_path(key)
     }
 
@@ -178,7 +176,7 @@ mod tests {
             db.commit(&trie).unwrap();
         }
 
-        let mut db = EthrexDB::open(db_path).unwrap();
+        let db = EthrexDB::open(db_path).unwrap();
         let value = db.get(b"key").unwrap();
         assert_eq!(value, Some(b"value".to_vec()));
     }

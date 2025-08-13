@@ -24,7 +24,8 @@ fn main() {
 
     // Single commit with all data
     let start_insert = Instant::now();
-    db.commit(&trie).unwrap();
+    let root_node = trie.root_node().unwrap().unwrap();
+    db.commit(&root_node).unwrap();
     println!("Insert phase completed in {:?}", start_insert.elapsed());
 
     // === PHASE 2: Random gets (this is what we want to profile) ===

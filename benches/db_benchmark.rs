@@ -131,6 +131,7 @@ impl LibmdbxPathDB {
 fn batch_insert_benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("batch_insert");
     group.measurement_time(Duration::from_secs(15));
+    group.sample_size(10);
 
     for size in [1_000, 10_000, 100_000, 1_000_000] {
         let data = generate_test_data(size);
@@ -176,7 +177,8 @@ fn batch_insert_benchmark(c: &mut Criterion) {
                     for (key, value) in data {
                         trie.insert(key.clone(), value.clone()).unwrap();
                     }
-                    db.commit(&trie).unwrap();
+                    let root_node = trie.root_node().unwrap().unwrap();
+                    db.commit(&root_node).unwrap();
                     db
                 },
             );
@@ -189,6 +191,7 @@ fn batch_insert_benchmark(c: &mut Criterion) {
 fn random_read_benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("random_read");
     group.measurement_time(Duration::from_secs(15));
+    group.sample_size(10);
 
     for size in [1_000, 10_000, 100_000, 1_000_000] {
         let data = generate_test_data(size);
@@ -216,7 +219,8 @@ fn random_read_benchmark(c: &mut Criterion) {
         for (key, value) in &data {
             trie.insert(key.clone(), value.clone()).unwrap();
         }
-        ethrex_db.commit(&trie).unwrap();
+        let root_node = trie.root_node().unwrap().unwrap();
+        ethrex_db.commit(&root_node).unwrap();
 
         group.bench_with_input(
             BenchmarkId::new("libmdbx_hash", size),

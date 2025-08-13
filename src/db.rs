@@ -31,14 +31,13 @@ impl EthrexDB {
     ///
     /// NOTE: Right now, we are storing the complete trie in the database. We should
     /// store only the root node and the updated nodes.
-    pub fn commit(&mut self, trie: &Trie) -> Result<NodeHash, TrieError> {
-        let root_node = trie.root_node()?.unwrap();
+    pub fn commit(&mut self, root_node: &Node) -> Result<NodeHash, TrieError> {
         let root_hash = root_node.compute_hash();
 
         // Read the previous root offset
         let previous_root_offset = self.file_manager.read_latest_root_offset()?;
 
-        let serialized_trie = serialize(&root_node);
+        let serialized_trie = serialize(root_node);
 
         // Prepare data to write: [prev_offset(8)] + [trie_data]
         let mut data_to_write = Vec::with_capacity(8 + serialized_trie.len());
@@ -158,8 +157,9 @@ mod tests {
         let mut trie = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
         trie.insert(b"hello".to_vec(), b"world".to_vec()).unwrap();
         trie.insert(b"foo".to_vec(), b"bar".to_vec()).unwrap();
+        let root_node = trie.root_node().unwrap().unwrap();
 
-        let root_hash = db.commit(&trie).unwrap();
+        let root_hash = db.commit(&root_node).unwrap();
         assert!(root_hash.as_ref() != [0u8; 32]);
     }
 
@@ -173,7 +173,8 @@ mod tests {
 
             let mut trie = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
             trie.insert(b"key".to_vec(), b"value".to_vec()).unwrap();
-            db.commit(&trie).unwrap();
+            let root_node = trie.root_node().unwrap().unwrap();
+            db.commit(&root_node).unwrap();
         }
 
         let db = EthrexDB::open(db_path).unwrap();
@@ -196,7 +197,8 @@ mod tests {
         trie.insert(b"foo".to_vec(), b"bar".to_vec()).unwrap();
         trie.insert(b"test".to_vec(), b"value".to_vec()).unwrap();
 
-        db.commit(&trie).unwrap();
+        let root_node = trie.root_node().unwrap().unwrap();
+        db.commit(&root_node).unwrap();
 
         // Test getting existing values
         assert_eq!(db.get(b"hello").unwrap(), Some(b"world".to_vec()));
@@ -217,17 +219,20 @@ mod tests {
         let mut trie1 = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
         trie1.insert(b"key1".to_vec(), b"value1".to_vec()).unwrap();
         trie1.insert(b"common".to_vec(), b"v1".to_vec()).unwrap();
-        db.commit(&trie1).unwrap();
+        let root_node = trie1.root_node().unwrap().unwrap();
+        db.commit(&root_node).unwrap();
 
         let mut trie2 = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
         trie2.insert(b"key2".to_vec(), b"value2".to_vec()).unwrap();
         trie2.insert(b"common".to_vec(), b"v2".to_vec()).unwrap();
-        db.commit(&trie2).unwrap();
+        let root_node = trie2.root_node().unwrap().unwrap();
+        db.commit(&root_node).unwrap();
 
         let mut trie3 = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
         trie3.insert(b"key3".to_vec(), b"value3".to_vec()).unwrap();
         trie3.insert(b"common".to_vec(), b"v3".to_vec()).unwrap();
-        db.commit(&trie3).unwrap();
+        let root_node = trie3.root_node().unwrap().unwrap();
+        db.commit(&root_node).unwrap();
 
         assert_eq!(db.get(b"key3").unwrap(), Some(b"value3".to_vec()));
         assert_eq!(db.get(b"common").unwrap(), Some(b"v3".to_vec()));
@@ -255,7 +260,8 @@ mod tests {
                 format!("value{}", i).into_bytes(),
             )
             .unwrap();
-            db.commit(&trie).unwrap();
+            let root_node = trie.root_node().unwrap().unwrap();
+            db.commit(&root_node).unwrap();
         }
 
         let roots: Vec<Node> = db.iter_roots().unwrap();
@@ -296,13 +302,15 @@ mod tests {
         for (key, value) in &test_data_v1 {
             trie_v1.insert(key.clone(), value.clone()).unwrap();
         }
-        db.commit(&trie_v1).unwrap();
+        let root_node = trie_v1.root_node().unwrap().unwrap();
+        db.commit(&root_node).unwrap();
 
         let mut trie_v2 = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
         for (key, value) in &test_data_v2 {
             trie_v2.insert(key.clone(), value.clone()).unwrap();
         }
-        db.commit(&trie_v2).unwrap();
+        let root_node = trie_v2.root_node().unwrap().unwrap();
+        db.commit(&root_node).unwrap();
 
         for (key, expected_value) in &test_data_v2 {
             let result = db.get(key).unwrap();
@@ -327,7 +335,8 @@ mod tests {
         for (key, value) in &complex_test_data {
             trie_v3.insert(key.clone(), value.clone()).unwrap();
         }
-        db.commit(&trie_v3).unwrap();
+        let root_node = trie_v3.root_node().unwrap().unwrap();
+        db.commit(&root_node).unwrap();
 
         for (key, expected_value) in &complex_test_data {
             let result = db.get(key).unwrap();

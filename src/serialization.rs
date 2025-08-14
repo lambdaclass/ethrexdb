@@ -1,22 +1,30 @@
+//! Serialization and deserialization of the trie
+//!
+//! Two-node serialization format:
+//! Instead of the standard 3 node types (Branch, Extension, Leaf), we use 2:
+//! - Branch: Has 16 children slots + 1 value slot
+//! - Extend: Has 1 child slot + 1 value slot (can represent both Extension and Leaf)
+//!
+//! This simplifies serialization:
+//! - Leaf -> Extend with value but no child (child_offset = 0)
+//! - Extension -> Extend with child but no value (value_offset = 0)
+//! - Branch -> Branch (unchanged)
+
 use std::sync::{Arc, OnceLock};
 
-// TODO: I'm using the ethrex-trie crate directly because `BranchNode`, `LeafNode` and
+// TODO: I'm using the ethrex-trie crate from my local repo because `BranchNode`, `LeafNode` and
 // `ExtensionNode` are private in the `ethrex-trie` crate.
 use ethrex_trie::{BranchNode, ExtensionNode, LeafNode, Nibbles, Node, NodeRef, TrieError};
 
-// Two-node system tags (MVP format)
 /// Tag for Branch node (16 children + 1 value)
 const TAG_BRANCH: u8 = 0;
 /// Tag for Extend node (combines Extension and Leaf)
 const TAG_EXTEND: u8 = 1;
 
-/// Serializes a Merkle Patricia Trie into a byte buffer using the two-node format.
+/// Serializes a Merkle Patricia Trie into a byte buffer using the two node format
 ///
-/// This follows the ETHREX_DB_MVP.md specification with only two node types:
 /// - Branch: 16 node offsets + 1 value offset
 /// - Extend: 1 node offset + 1 value offset (combines Extension and Leaf)
-///
-/// The format uses offsets instead of inline data for better file management.
 #[derive(Default)]
 pub struct Serializer {
     /// Buffer where serialized data is accumulated
@@ -28,13 +36,13 @@ impl Serializer {
         Self::default()
     }
 
-    /// Serializes a trie using the two-node format
+    /// Serializes a trie using the two node format
     pub fn serialize_tree(mut self, root: &Node) -> Result<Vec<u8>, TrieError> {
         self.serialize_node(root)?;
         Ok(self.buffer)
     }
 
-    /// Serializes a node, converting from 3-node to 2-node system
+    /// Serializes a node, converting from 3 node to 2 node system
     fn serialize_node(&mut self, node: &Node) -> Result<u64, TrieError> {
         let offset = self.buffer.len() as u64;
 
@@ -43,7 +51,6 @@ impl Serializer {
                 // Leaf becomes Extend with only value
                 self.buffer.push(TAG_EXTEND);
 
-                // Write nibbles with proper encoding
                 let compact_nibbles = leaf.partial.encode_compact();
                 self.write_bytes_with_len(&compact_nibbles);
 
@@ -52,8 +59,6 @@ impl Serializer {
                 self.buffer.extend_from_slice(&0u64.to_le_bytes()); // node offset = 0
                 self.buffer.extend_from_slice(&0u64.to_le_bytes()); // value offset placeholder
 
-                // Write value and get its offset
-                // Even empty values need to be written to maintain the Extend node structure
                 let value_offset = self.buffer.len() as u64;
                 self.write_bytes_with_len(&leaf.value);
 
@@ -67,16 +72,14 @@ impl Serializer {
                 // Extension becomes Extend with only child
                 self.buffer.push(TAG_EXTEND);
 
-                // Write nibbles
                 let compact_prefix = ext.prefix.encode_compact();
                 self.write_bytes_with_len(&compact_prefix);
 
-                // Reserve space for offsets (we'll fill them later)
+                // Reserve space for offsets
                 let child_offset_pos = self.buffer.len();
                 self.buffer.extend_from_slice(&0u64.to_le_bytes()); // child offset placeholder
                 self.buffer.extend_from_slice(&0u64.to_le_bytes()); // value offset = 0
 
-                // Now serialize child and get its offset
                 let child_offset = match &ext.child {
                     NodeRef::Hash(hash) => {
                         if hash.is_valid() {
@@ -152,206 +155,26 @@ impl Serializer {
 /// Deserializes a Merkle Patricia Trie from a byte buffer.
 ///
 /// The deserializer reads the binary format produced by [`Serializer`].
-/// It uses the two-node format and converts back to the standard 3-node format.
-/// Optimized for memory-mapped file access with zero-copy operations.
+/// It uses the two node format and converts back to the standard 3 node format.
 pub struct Deserializer<'a> {
     /// The byte buffer containing serialized trie data
     buffer: &'a [u8],
 }
 
 impl<'a> Deserializer<'a> {
-    /// Creates a new fast deserializer for the given buffer
+    /// Creates a new deserializer for the given buffer
     pub fn new(buffer: &'a [u8]) -> Self {
         Self { buffer }
     }
 
-    /// Gets a value by path without copying data, optimized for memory-mapped files
-    pub fn get_by_path(&self, path: &[u8]) -> Result<Option<Vec<u8>>, TrieError> {
-        if self.buffer.is_empty() {
-            return Ok(None);
-        }
-
-        let nibbles = Nibbles::from_raw(path, false);
-        self.get_by_path_inner(nibbles, 0)
-    }
-
-    /// Internal helper for get_by_path with position tracking
-    fn get_by_path_inner(
-        &self,
-        mut path: Nibbles,
-        pos: usize,
-    ) -> Result<Option<Vec<u8>>, TrieError> {
-        if pos >= self.buffer.len() {
-            return Ok(None);
-        }
-
-        let tag = self.buffer[pos];
-        let mut position = pos + 1;
-
-        match tag {
-            TAG_EXTEND => {
-                // Read nibbles length
-                if position + 4 > self.buffer.len() {
-                    return Ok(None);
-                }
-                let len = u32::from_le_bytes([
-                    self.buffer[position],
-                    self.buffer[position + 1],
-                    self.buffer[position + 2],
-                    self.buffer[position + 3],
-                ]) as usize;
-                position += 4;
-
-                // Read nibbles data
-                if position + len > self.buffer.len() {
-                    return Ok(None);
-                }
-                let compact_nibbles = &self.buffer[position..position + len];
-                let nibbles = Nibbles::decode_compact(compact_nibbles);
-                position += len;
-
-                // Read node offset
-                if position + 8 > self.buffer.len() {
-                    return Ok(None);
-                }
-                let node_offset = u64::from_le_bytes([
-                    self.buffer[position],
-                    self.buffer[position + 1],
-                    self.buffer[position + 2],
-                    self.buffer[position + 3],
-                    self.buffer[position + 4],
-                    self.buffer[position + 5],
-                    self.buffer[position + 6],
-                    self.buffer[position + 7],
-                ]);
-                position += 8;
-
-                // Read value offset
-                if position + 8 > self.buffer.len() {
-                    return Ok(None);
-                }
-                let value_offset = u64::from_le_bytes([
-                    self.buffer[position],
-                    self.buffer[position + 1],
-                    self.buffer[position + 2],
-                    self.buffer[position + 3],
-                    self.buffer[position + 4],
-                    self.buffer[position + 5],
-                    self.buffer[position + 6],
-                    self.buffer[position + 7],
-                ]);
-
-                // Check if this is a leaf (only value)
-                if node_offset == 0 && value_offset > 0 {
-                    let leaf_path_without_flag = if nibbles.is_leaf() {
-                        nibbles.slice(0, nibbles.len() - 1)
-                    } else {
-                        nibbles
-                    };
-
-                    if path == leaf_path_without_flag {
-                        self.read_value_at_offset(value_offset as usize)
-                    } else {
-                        Ok(None)
-                    }
-                } else if node_offset > 0 && value_offset == 0 {
-                    // Extension node
-                    if !path.skip_prefix(&nibbles) {
-                        return Ok(None);
-                    }
-                    self.get_by_path_inner(path, node_offset as usize)
-                } else {
-                    panic!("Extend node with both child and value not yet supported");
-                }
-            }
-            TAG_BRANCH => {
-                if path.is_empty() {
-                    // We want the branch value - skip 16 child offsets
-                    position += 16 * 8;
-
-                    if position + 8 > self.buffer.len() {
-                        return Ok(None);
-                    }
-                    let value_offset = u64::from_le_bytes([
-                        self.buffer[position],
-                        self.buffer[position + 1],
-                        self.buffer[position + 2],
-                        self.buffer[position + 3],
-                        self.buffer[position + 4],
-                        self.buffer[position + 5],
-                        self.buffer[position + 6],
-                        self.buffer[position + 7],
-                    ]);
-
-                    if value_offset > 0 {
-                        self.read_value_at_offset(value_offset as usize)
-                    } else {
-                        Ok(None)
-                    }
-                } else {
-                    // Get next nibble and find corresponding child
-                    let next_nibble = match path.next_choice() {
-                        Some(nibble) => nibble,
-                        None => return Ok(None),
-                    };
-
-                    // Read child offset at position next_nibble
-                    let child_offset_pos = position + next_nibble * 8;
-                    if child_offset_pos + 8 > self.buffer.len() {
-                        return Ok(None);
-                    }
-
-                    let child_offset = u64::from_le_bytes([
-                        self.buffer[child_offset_pos],
-                        self.buffer[child_offset_pos + 1],
-                        self.buffer[child_offset_pos + 2],
-                        self.buffer[child_offset_pos + 3],
-                        self.buffer[child_offset_pos + 4],
-                        self.buffer[child_offset_pos + 5],
-                        self.buffer[child_offset_pos + 6],
-                        self.buffer[child_offset_pos + 7],
-                    ]);
-
-                    if child_offset > 0 {
-                        self.get_by_path_inner(path, child_offset as usize)
-                    } else {
-                        Ok(None)
-                    }
-                }
-            }
-            _ => panic!("Invalid node tag: {}", tag),
-        }
-    }
-
-    /// Read value at specific offset
-    fn read_value_at_offset(&self, offset: usize) -> Result<Option<Vec<u8>>, TrieError> {
-        if offset + 4 > self.buffer.len() {
-            return Ok(None);
-        }
-
-        let len = u32::from_le_bytes([
-            self.buffer[offset],
-            self.buffer[offset + 1],
-            self.buffer[offset + 2],
-            self.buffer[offset + 3],
-        ]) as usize;
-
-        let data_start = offset + 4;
-        if data_start + len > self.buffer.len() {
-            return Ok(None);
-        }
-
-        Ok(Some(self.buffer[data_start..data_start + len].to_vec()))
-    }
-
-    /// Deserializes a tree from the two-node format back to standard 3-node format
+    /// Deserializes a tree from the two node format back to standard 3 node format
     pub fn decode_tree(&self) -> Result<Node, TrieError> {
         let node = self.decode_node_at(0)?;
         node.compute_hash();
         Ok(node)
     }
 
-    /// Decodes a node from the two-node format at specific position
+    /// Decodes a node from the two node format at specific position
     fn decode_node_at(&self, pos: usize) -> Result<Node, TrieError> {
         if pos >= self.buffer.len() {
             panic!("Invalid buffer position");
@@ -431,7 +254,7 @@ impl<'a> Deserializer<'a> {
                         )))
                     }
                     (true, true) => {
-                        panic!("Extend node with both child and value not yet supported");
+                        panic!("Extend node with both child and value not supported");
                     }
                     (false, false) => {
                         panic!("Invalid Extend node with no child or value");
@@ -496,6 +319,187 @@ impl<'a> Deserializer<'a> {
             }
             _ => panic!("Invalid node tag: {}", tag),
         }
+    }
+
+    /// Gets a value by path without copying data
+    pub fn get_by_path(&self, path: &[u8]) -> Result<Option<Vec<u8>>, TrieError> {
+        if self.buffer.is_empty() {
+            return Ok(None);
+        }
+
+        let nibbles = Nibbles::from_raw(path, false);
+        self.get_by_path_inner(nibbles, 0)
+    }
+
+    /// Internal helper for get_by_path with position tracking
+    fn get_by_path_inner(
+        &self,
+        mut path: Nibbles,
+        pos: usize,
+    ) -> Result<Option<Vec<u8>>, TrieError> {
+        if pos >= self.buffer.len() {
+            return Ok(None);
+        }
+
+        let tag = self.buffer[pos];
+        let mut position = pos + 1;
+
+        match tag {
+            TAG_EXTEND => {
+                // Read nibbles length
+                if position + 4 > self.buffer.len() {
+                    return Ok(None);
+                }
+                let len = u32::from_le_bytes([
+                    self.buffer[position],
+                    self.buffer[position + 1],
+                    self.buffer[position + 2],
+                    self.buffer[position + 3],
+                ]) as usize;
+                position += 4;
+
+                // Read nibbles data
+                if position + len > self.buffer.len() {
+                    return Ok(None);
+                }
+                let compact_nibbles = &self.buffer[position..position + len];
+                let nibbles = Nibbles::decode_compact(compact_nibbles);
+                position += len;
+
+                // Read node offset
+                if position + 8 > self.buffer.len() {
+                    return Ok(None);
+                }
+                let node_offset = u64::from_le_bytes([
+                    self.buffer[position],
+                    self.buffer[position + 1],
+                    self.buffer[position + 2],
+                    self.buffer[position + 3],
+                    self.buffer[position + 4],
+                    self.buffer[position + 5],
+                    self.buffer[position + 6],
+                    self.buffer[position + 7],
+                ]);
+                position += 8;
+
+                // Read value offset
+                if position + 8 > self.buffer.len() {
+                    return Ok(None);
+                }
+                let value_offset = u64::from_le_bytes([
+                    self.buffer[position],
+                    self.buffer[position + 1],
+                    self.buffer[position + 2],
+                    self.buffer[position + 3],
+                    self.buffer[position + 4],
+                    self.buffer[position + 5],
+                    self.buffer[position + 6],
+                    self.buffer[position + 7],
+                ]);
+
+                // Extend has only a child or a value
+                if node_offset == 0 && value_offset > 0 {
+                    // Leaf node
+                    let leaf_path_without_flag = if nibbles.is_leaf() {
+                        nibbles.slice(0, nibbles.len() - 1)
+                    } else {
+                        nibbles
+                    };
+
+                    if path == leaf_path_without_flag {
+                        self.read_value_at_offset(value_offset as usize)
+                    } else {
+                        Ok(None)
+                    }
+                } else if node_offset > 0 && value_offset == 0 {
+                    // Extension node
+                    if !path.skip_prefix(&nibbles) {
+                        return Ok(None);
+                    }
+                    // Recurse into the child
+                    self.get_by_path_inner(path, node_offset as usize)
+                } else {
+                    panic!("Extend node with both child and value not supported");
+                }
+            }
+            TAG_BRANCH => {
+                if path.is_empty() {
+                    // Skip 16 child offsets
+                    position += 16 * 8;
+
+                    if position + 8 > self.buffer.len() {
+                        return Ok(None);
+                    }
+                    let value_offset = u64::from_le_bytes([
+                        self.buffer[position],
+                        self.buffer[position + 1],
+                        self.buffer[position + 2],
+                        self.buffer[position + 3],
+                        self.buffer[position + 4],
+                        self.buffer[position + 5],
+                        self.buffer[position + 6],
+                        self.buffer[position + 7],
+                    ]);
+
+                    if value_offset > 0 {
+                        self.read_value_at_offset(value_offset as usize)
+                    } else {
+                        Ok(None)
+                    }
+                } else {
+                    // Get next nibble and find corresponding child
+                    let next_nibble = match path.next_choice() {
+                        Some(nibble) => nibble,
+                        None => return Ok(None),
+                    };
+
+                    // Read child offset at position next_nibble
+                    let child_offset_pos = position + next_nibble * 8;
+                    if child_offset_pos + 8 > self.buffer.len() {
+                        return Ok(None);
+                    }
+
+                    let child_offset = u64::from_le_bytes([
+                        self.buffer[child_offset_pos],
+                        self.buffer[child_offset_pos + 1],
+                        self.buffer[child_offset_pos + 2],
+                        self.buffer[child_offset_pos + 3],
+                        self.buffer[child_offset_pos + 4],
+                        self.buffer[child_offset_pos + 5],
+                        self.buffer[child_offset_pos + 6],
+                        self.buffer[child_offset_pos + 7],
+                    ]);
+
+                    if child_offset > 0 {
+                        self.get_by_path_inner(path, child_offset as usize)
+                    } else {
+                        Ok(None)
+                    }
+                }
+            }
+            _ => panic!("Invalid node tag: {}", tag),
+        }
+    }
+
+    /// Read value at specific offset
+    fn read_value_at_offset(&self, offset: usize) -> Result<Option<Vec<u8>>, TrieError> {
+        if offset + 4 > self.buffer.len() {
+            return Ok(None);
+        }
+
+        let len = u32::from_le_bytes([
+            self.buffer[offset],
+            self.buffer[offset + 1],
+            self.buffer[offset + 2],
+            self.buffer[offset + 3],
+        ]) as usize;
+
+        let data_start = offset + 4;
+        if data_start + len > self.buffer.len() {
+            return Ok(None);
+        }
+
+        Ok(Some(self.buffer[data_start..data_start + len].to_vec()))
     }
 }
 

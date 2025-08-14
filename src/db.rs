@@ -1,7 +1,5 @@
 //! EthrexDB - A simple MPT database
-// FIXME
 
-// src/ethrex_db.rs
 use crate::file_manager::FileManager;
 use crate::serialization::{Deserializer, serialize};
 use ethrex_trie::{Node, NodeHash, TrieError};
@@ -28,25 +26,31 @@ impl EthrexDB {
 
     /// Commit a new trie to the database
     ///
+    /// Creates a new version in the database by:
+    /// 1. Reading the current latest version offset from header
+    /// 2. Serializing the trie nodes
+    /// 3. Writing [previous_offset][serialized_nodes] at the end of file
+    /// 4. Updating the header to point to this new version
+    ///
     /// NOTE: Right now, we are storing the complete trie in the database. We should
     /// store only the root node and the updated nodes.
     pub fn commit(&mut self, root_node: &Node) -> Result<NodeHash, TrieError> {
         let root_hash = root_node.compute_hash();
 
-        // Read the previous root offset
+        // Read the previous root offset from header
         let previous_root_offset = self.file_manager.read_latest_root_offset()?;
 
         let serialized_trie = serialize(root_node);
 
-        // Prepare data to write: [prev_offset(8)] + [trie_data]
+        // Prepare version data: [prev_offset(8 bytes)] + [trie_data]
         let mut data_to_write = Vec::with_capacity(8 + serialized_trie.len());
         data_to_write.extend_from_slice(&previous_root_offset.to_le_bytes());
         data_to_write.extend_from_slice(&serialized_trie);
 
-        // Write at the end and get the new offset
+        // Write at the end and get the offset where this version starts
         let new_root_offset = self.file_manager.write_at_end(&data_to_write)?;
 
-        // Update header with the new offset
+        // Update header to point to this new version
         self.file_manager
             .update_latest_root_offset(new_root_offset)?;
 
@@ -91,7 +95,7 @@ impl EthrexDB {
         while current_offset != 0 {
             let trie_data = self.get_trie_data_at_version(current_offset)?;
 
-            // Still need to copy for deserializer decode_tree
+            // Deserialize the trie at this version
             let root_node = Deserializer::new(trie_data).decode_tree()?;
             roots.push(root_node);
             current_offset = self.read_previous_offset_at_version(current_offset)?;
@@ -101,8 +105,11 @@ impl EthrexDB {
     }
 
     /// Get trie data slice at a specific version
+    ///
+    /// Each version has format: [prev_offset: 8 bytes][trie_data]
+    /// This function skips the prev_offset and returns only the trie_data portion
     fn get_trie_data_at_version(&self, version_offset: u64) -> Result<&[u8], TrieError> {
-        // Skip the previous offset (8 bytes) and read trie data
+        // Skip the previous offset (8 bytes) to get to the trie data
         let trie_data_start = version_offset + 8;
         let next_version_offset = self.find_next_version_offset(version_offset)?;
 
@@ -112,14 +119,13 @@ impl EthrexDB {
                 self.file_manager.get_slice_at(trie_data_start, size)
             }
             None => {
-                // Es la versión más antigua, leer hasta el final
+                // Last version, read until the end
                 self.file_manager.get_slice_to_end(trie_data_start)
             }
         }
     }
 
     /// Read the previous offset at a specific version
-    /// The previous offset is located before the nodes data.
     fn read_previous_offset_at_version(&self, version_offset: u64) -> Result<u64, TrieError> {
         let prev_offset_slice = self.file_manager.get_slice_at(version_offset, 8)?;
         Ok(u64::from_le_bytes([
@@ -134,11 +140,12 @@ impl EthrexDB {
         ]))
     }
 
-    /// Find the offset of the next version
+    /// Find the offset of the next version after the given offset
     fn find_next_version_offset(&self, current_offset: u64) -> Result<Option<u64>, TrieError> {
         let mut offsets = Vec::new();
         let mut offset = self.file_manager.read_latest_root_offset()?;
 
+        // Collect all version offsets by following the linked list
         while offset != 0 {
             offsets.push(offset);
             offset = self.read_previous_offset_at_version(offset)?;
@@ -229,8 +236,9 @@ mod tests {
         trie.insert(b"common".to_vec(), b"v1".to_vec()).unwrap();
         let root_node = trie.root_node().unwrap().unwrap();
         db.commit(&root_node).unwrap();
-        // If we call commit(), NodeRef::Node will be converted to NodeRef::Hash
-        // We don't support this yet. TODO: Implement this.
+
+        // Note: We can't call trie.commit() because it converts NodeRef::Node to NodeRef::Hash
+        // and our serialization doesn't support hash references yet
         // trie.commit().unwrap();
 
         assert_eq!(db.root().unwrap(), root_node);
@@ -240,8 +248,9 @@ mod tests {
         trie.insert(b"common".to_vec(), b"v2".to_vec()).unwrap();
         let root_node = trie.root_node().unwrap().unwrap();
         db.commit(&root_node).unwrap();
-        // If we call commit(), NodeRef::Node will be converted to NodeRef::Hash
-        // We don't support this yet.
+
+        // Note: We can't call trie.commit() because it converts NodeRef::Node to NodeRef::Hash
+        // and our serialization doesn't support hash references yet
         // trie.commit().unwrap();
 
         assert_eq!(db.root().unwrap(), root_node);
@@ -249,10 +258,10 @@ mod tests {
         trie.insert(b"key3".to_vec(), b"value3".to_vec()).unwrap();
         trie.insert(b"common".to_vec(), b"v3".to_vec()).unwrap();
         let root_node = trie.root_node().unwrap().unwrap();
-
         db.commit(&root_node).unwrap();
-        // If we call commit(), NodeRef::Node will be converted to NodeRef::Hash
-        // We don't support this yet.
+
+        // Note: We can't call trie.commit() because it converts NodeRef::Node to NodeRef::Hash
+        // and our serialization doesn't support hash references yet
         // trie.commit().unwrap();
 
         assert_eq!(db.root().unwrap(), root_node);

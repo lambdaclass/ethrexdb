@@ -5,10 +5,24 @@ use std::io::{Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
 /// Responsible for file management and offsets
+///
+/// File format:
+/// ```text
+/// [header: 8 bytes] -> points to latest root version
+/// [version 1: [prev_offset: 8 bytes][nodes]]
+/// [version 2: [prev_offset: 8 bytes][nodes]]
+/// ...
+/// [version N: [prev_offset: 8 bytes][nodes]] <- latest version
+/// ```
+///
+/// Each version contains:
+/// - prev_offset: Points to the previous version
+/// - nodes: Serialized trie nodes
 pub struct FileManager {
     /// File where the data is stored
     file: File,
     /// Memory-mapped of the file
+    /// TODO: Handle case when adding new nodes
     mmap: Mmap,
 }
 
@@ -27,7 +41,7 @@ impl FileManager {
             .open(&file_path)
             .unwrap();
 
-        // Write initial offset (8 bytes = 0)
+        // Write initial header: offset = 0
         let initial_offset = 0u64;
         file.write_all(&initial_offset.to_le_bytes()).unwrap();
         file.flush().unwrap();
@@ -50,7 +64,7 @@ impl FileManager {
         Ok(Self { file, mmap })
     }
 
-    /// Read the offset of the latest root (first 8 bytes of the file)
+    /// Read the offset of the latest root from the file header
     pub fn read_latest_root_offset(&self) -> Result<u64, TrieError> {
         if self.mmap.len() < 8 {
             return Ok(0);
@@ -60,7 +74,7 @@ impl FileManager {
         Ok(u64::from_le_bytes(offset_bytes))
     }
 
-    /// Update the offset of the latest root (first 8 bytes of the file)
+    /// Update the header to point to the new latest root version
     pub fn update_latest_root_offset(&mut self, new_offset: u64) -> Result<(), TrieError> {
         self.file.seek(SeekFrom::Start(0)).unwrap();
         self.file.write_all(&new_offset.to_le_bytes()).unwrap();

@@ -1,11 +1,10 @@
 //! EthrexDB - A simple MPT database
 // FIXME
-#![allow(dead_code)]
 
 // src/ethrex_db.rs
 use crate::file_manager::FileManager;
 use crate::serialization::{Deserializer, serialize};
-use ethrex_trie::{Node, NodeHash, Trie, TrieError};
+use ethrex_trie::{Node, NodeHash, TrieError};
 use std::path::PathBuf;
 
 /// Ethrex DB struct

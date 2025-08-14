@@ -8,7 +8,6 @@ categories = ["database-implementations"]
 
 [dependencies]
 memmap2 = "0.9.7"
-tempdir = "0.3.7"
 
 # ethrex
 # FIXME: Using local repo
@@ -20,8 +19,9 @@ criterion = { version = "0.5", features = ["html_reports"] }
 # FIXME: Using local repo
 ethrex-storage = { path = "../ethrex/crates/storage/" , features = ["libmdbx"] }
 libmdbx = { version = "=0.5.3", features = ["orm"] }
-sha3 = "0.10.8"
 rand = "0.8.5"
+sha3 = "0.10.8"
+tempdir = "0.3.7"
 
 [[bench]]
 name = "db_benchmark"

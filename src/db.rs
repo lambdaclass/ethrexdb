@@ -53,6 +53,14 @@ impl EthrexDB {
         Ok(root_hash)
     }
 
+    /// Get the latest root node of the database
+    pub fn root(&self) -> Result<Node, TrieError> {
+        let latest_offset = self.file_manager.read_latest_root_offset()?;
+        let trie_data = self.get_trie_data_at_version(latest_offset)?;
+        let root_node = Deserializer::new(trie_data).decode_tree()?;
+        Ok(root_node)
+    }
+
     /// Get the value of the node with the given key
     pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, TrieError> {
         let latest_offset = self.file_manager.read_latest_root_offset()?;
@@ -75,6 +83,7 @@ impl EthrexDB {
     }
 
     /// Get all the roots of the database
+    /// TODO: Make this an iterator
     pub fn iter_roots(&self) -> Result<Vec<Node>, TrieError> {
         let mut roots = Vec::new();
         let mut current_offset = self.file_manager.read_latest_root_offset()?;
@@ -215,31 +224,46 @@ mod tests {
 
         let mut db = EthrexDB::new(db_path.clone()).unwrap();
 
-        let mut trie1 = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
-        trie1.insert(b"key1".to_vec(), b"value1".to_vec()).unwrap();
-        trie1.insert(b"common".to_vec(), b"v1".to_vec()).unwrap();
-        let root_node = trie1.root_node().unwrap().unwrap();
+        let mut trie = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
+        trie.insert(b"key1".to_vec(), b"value1".to_vec()).unwrap();
+        trie.insert(b"common".to_vec(), b"v1".to_vec()).unwrap();
+        let root_node = trie.root_node().unwrap().unwrap();
         db.commit(&root_node).unwrap();
+        // If we call commit(), NodeRef::Node will be converted to NodeRef::Hash
+        // We don't support this yet. TODO: Implement this.
+        // trie.commit().unwrap();
 
-        let mut trie2 = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
-        trie2.insert(b"key2".to_vec(), b"value2".to_vec()).unwrap();
-        trie2.insert(b"common".to_vec(), b"v2".to_vec()).unwrap();
-        let root_node = trie2.root_node().unwrap().unwrap();
-        db.commit(&root_node).unwrap();
+        assert_eq!(db.root().unwrap(), root_node);
 
-        let mut trie3 = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
-        trie3.insert(b"key3".to_vec(), b"value3".to_vec()).unwrap();
-        trie3.insert(b"common".to_vec(), b"v3".to_vec()).unwrap();
-        let root_node = trie3.root_node().unwrap().unwrap();
+        // let mut trie2 = Trie::new(Box::new(InMemoryTrieDB::new_empty()));
+        trie.insert(b"key2".to_vec(), b"value2".to_vec()).unwrap();
+        trie.insert(b"common".to_vec(), b"v2".to_vec()).unwrap();
+        let root_node = trie.root_node().unwrap().unwrap();
         db.commit(&root_node).unwrap();
+        // If we call commit(), NodeRef::Node will be converted to NodeRef::Hash
+        // We don't support this yet.
+        // trie.commit().unwrap();
+
+        assert_eq!(db.root().unwrap(), root_node);
+
+        trie.insert(b"key3".to_vec(), b"value3".to_vec()).unwrap();
+        trie.insert(b"common".to_vec(), b"v3".to_vec()).unwrap();
+        let root_node = trie.root_node().unwrap().unwrap();
+
+        db.commit(&root_node).unwrap();
+        // If we call commit(), NodeRef::Node will be converted to NodeRef::Hash
+        // We don't support this yet.
+        // trie.commit().unwrap();
+
+        assert_eq!(db.root().unwrap(), root_node);
 
         assert_eq!(db.get(b"key3").unwrap(), Some(b"value3".to_vec()));
         assert_eq!(db.get(b"common").unwrap(), Some(b"v3".to_vec()));
-        assert_eq!(db.get(b"key1").unwrap(), None);
-        assert_eq!(db.get(b"key2").unwrap(), None);
+        assert_eq!(db.get(b"key1").unwrap(), Some(b"value1".to_vec()));
+        assert_eq!(db.get(b"key2").unwrap(), Some(b"value2".to_vec()));
 
-        let roots: Vec<Node> = db.iter_roots().unwrap();
-        assert_eq!(roots.len(), 3);
+        assert_eq!(db.get(b"nonexistent").unwrap(), None);
+        assert_eq!(db.iter_roots().unwrap().len(), 3);
     }
 
     #[test]

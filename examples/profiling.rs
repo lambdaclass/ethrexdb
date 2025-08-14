@@ -1,4 +1,3 @@
-// examples/profile_gets.rs
 use ethrex_trie::{InMemoryTrieDB, Trie};
 use ethrexdb::EthrexDB;
 use rand::{Rng, thread_rng};
